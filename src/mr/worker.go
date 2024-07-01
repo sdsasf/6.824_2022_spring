@@ -209,7 +209,7 @@ func (w *worker) doMapTask(t *Task) {
 	tempFileTable := make([]string, 0)
 	for i, partition := range partitions {
 		filename := fmt.Sprintf("mr-%d-%d.*.json", t.TaskID, i)
-		tempFile, err := os.CreateTemp("./", filename)
+		tempFile, err := os.CreateTemp("./my-mr-tmp/", filename)
 		if err != nil {
 			log.Fatal(err)
 			// log.Fatalf("create temp file %v failed", filename)
@@ -225,10 +225,17 @@ func (w *worker) doMapTask(t *Task) {
 	}
 	if w.reportTask(t, COMPLETE) {
 		for i, tempFileName := range tempFileTable {
-			fileName := fmt.Sprintf("./mr-%d-%d.json", t.TaskID, i)
+			fileName := fmt.Sprintf("./my-mr-tmp/mr-%d-%d.json", t.TaskID, i)
 			if err := os.Rename(tempFileName, fileName); err != nil {
 				log.Fatal(err)
 				// log.Fatalln("rename temp file failed")
+			}
+		}
+	} else {
+		// clean temp files
+		for _, tempFileName := range tempFileTable {
+			if err := os.Remove(tempFileName); err != nil {
+				log.Fatalf("clean temp file %v failed\n", tempFileName)
 			}
 		}
 	}
@@ -238,11 +245,11 @@ func (w *worker) doReduceTask(t *Task) {
 	m := make(map[string][]string)
 	// log.Printf("w.nMap = %d\n", w.nMap)
 	for i := 0; i < w.nMap; i++ {
-		filename := fmt.Sprintf("./mr-%d-%d.json", i, t.TaskID)
+		filename := fmt.Sprintf("./my-mr-tmp/mr-%d-%d.json", i, t.TaskID)
 		file, err := os.Open(filename)
 		if err != nil {
 			w.reportTask(t, FAILED)
-			log.Fatalf("cannot read ./mr-%d-%d.json", i, t.TaskID)
+			log.Fatalf("cannot read ./my-mr-tmp/mr-%d-%d.json", i, t.TaskID)
 		}
 		// log.Printf("open file %s\n", filename)
 		dec := json.NewDecoder(file)
@@ -267,7 +274,7 @@ func (w *worker) doReduceTask(t *Task) {
 	for k, v := range m {
 		res = append(res, fmt.Sprintf("%v %v\n", k, w.reducef(k, v)))
 	}
-	oname := fmt.Sprintf("./mr-out-%d", t.TaskID)
+	oname := fmt.Sprintf("./my-mr-tmp/mr-out-%d", t.TaskID)
 	if os.WriteFile(oname, []byte(strings.Join(res, "")), 0600) != nil {
 		w.reportTask(t, FAILED)
 		log.Fatalln("write reduce file failed")
