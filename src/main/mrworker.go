@@ -10,7 +10,10 @@ package main
 // Please do not change this file.
 //
 
-import "6.824/mr"
+import (
+	"6.824/mr"
+	"strings"
+)
 import "plugin"
 import "os"
 import "fmt"
@@ -23,14 +26,16 @@ func main() {
 	}
 
 	mapf, reducef := loadPlugin(os.Args[1])
-
-	mr.Worker(mapf, reducef)
+	setCombiner := false
+	if strings.Contains(os.Args[1], "wc.so") {
+		setCombiner = true
+		log.Printf("set combiner\n")
+	}
+	mr.Worker(mapf, reducef, setCombiner)
 }
 
-//
 // load the application Map and Reduce functions
 // from a plugin file, e.g. ../mrapps/wc.so
-//
 func loadPlugin(filename string) (func(string, string) []mr.KeyValue, func(string, []string) string) {
 	p, err := plugin.Open(filename)
 	if err != nil {
