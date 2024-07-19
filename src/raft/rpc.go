@@ -26,26 +26,34 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	if args.Term <= rf.currentTerm {
+	if args.Term < rf.currentTerm {
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = false
 		return
 	}
-	// args.Term > rf.currentTerm
-	if rf.state == LEADER {
-		rf.stopHeartbeatCh <- struct{}{}
+	if args.Term == rf.currentTerm && (rf.state == LEADER || rf.state == CANDIDATE) {
+		reply.Term = rf.currentTerm
+		reply.VoteGranted = false
+		return
 	}
-	rf.state = FOLLOWER
-	rf.currentTerm = args.Term
-	rf.votedFor = -1
-	if (rf.votedFor == -1 || rf.votedFor == args.CandidateId) &&
-		(rf.log[len(rf.log)-1].Term > args.LastLogTerm || (rf.log[len(rf.log)-1].Term == args.LastLogTerm && len(rf.log)-1 > args.LastLogIndex)) {
+
+	if args.Term > rf.currentTerm {
+		if rf.state == LEADER {
+			rf.stopHeartbeatCh <- struct{}{}
+		}
+		rf.state = FOLLOWER
+		rf.currentTerm = args.Term
+		rf.votedFor = -1
+	}
+	if (rf.votedFor != -1 && rf.votedFor != args.CandidateId) ||
+		(rf.log[len(rf.log)-1].Term > args.LastLogTerm ||
+			(rf.log[len(rf.log)-1].Term == args.LastLogTerm && len(rf.log)-1 > args.LastLogIndex)) {
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = false
 	} else {
 		rf.resetTimer(rf.electionTimer, true, 0)
 		if ENABLE_VOTE_LOG {
-			fmt.Printf("node %d vote for node %d\n", rf.me, args.CandidateId)
+			fmt.Printf("node %d vote for node %d in term %d\n", rf.me, args.CandidateId, rf.currentTerm)
 		}
 		rf.votedFor = args.CandidateId
 		reply.Term = args.Term
@@ -66,8 +74,6 @@ type AppendEntriesArgs struct {
 type AppendEntriesReply struct {
 	Term    int
 	Success bool
-	// handle multi-leader
-	CheckLog bool
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
@@ -75,7 +81,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	defer rf.mu.Unlock()
 	// check term
 	if args.Term < rf.currentTerm {
-		reply.CheckLog = true
 		// outdated leader heartbeat, return high term directly
 		reply.Term = rf.currentTerm
 		reply.Success = false
@@ -89,26 +94,26 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 
 	if args.Term > rf.currentTerm {
-		reply.CheckLog = true
+		// outdated leader
 		if rf.state == LEADER {
 			// should stop heartbeat
-			rf.state = FOLLOWER
 			rf.stopHeartbeatCh <- struct{}{}
 		}
 		rf.currentTerm = args.Term
 		rf.votedFor = -1
+		rf.state = FOLLOWER
+
 		if ENABLE_STATE_LOG {
 			fmt.Printf("node %d become follower in term %d\n", rf.me, rf.currentTerm)
 		}
 
 		// check prevLogIndex and prevLog
-		if (len(rf.log)-1 < args.PrevLogIndex) ||
-			(args.PrevLogIndex != -1 && rf.log[args.PrevLogIndex].Term != args.PrevLogTerm) {
+		if (len(rf.log)-1 < args.PrevLogIndex) || (rf.log[args.PrevLogIndex].Term != args.PrevLogTerm) {
 			reply.Term = rf.currentTerm
 			reply.Success = false
 			return
 		}
-		rf.state = FOLLOWER
+		// prevLogIndex and prevLog is right
 		reply.Term = rf.currentTerm
 		reply.Success = true
 
@@ -132,18 +137,13 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			}
 			rf.applyCond.Signal()
 		}
+		rf.persist()
 	} else {
-		if rf.state == LEADER {
-			if rf.commitIndex < args.LeaderCommit {
-				rf.state = FOLLOWER
-				rf.stopHeartbeatCh <- struct{}{}
-			}
-			reply.Term = rf.currentTerm
-			reply.Success = false
-			reply.CheckLog = false
-			return
+		// heartbeat term is equal to current term
+		if rf.state == CANDIDATE {
+			rf.state = FOLLOWER
 		} else {
-			reply.CheckLog = true
+			// normal heartbeat, rf.state must FOLLOWER
 			// check prevLogIndex and prevLog
 			if (len(rf.log)-1 < args.PrevLogIndex) ||
 				(args.PrevLogIndex != -1 && rf.log[args.PrevLogIndex].Term != args.PrevLogTerm) {
@@ -175,6 +175,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 				rf.applyCond.Signal()
 			}
 		}
+		rf.persist()
 	}
 }
 

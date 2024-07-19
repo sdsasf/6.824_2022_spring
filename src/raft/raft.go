@@ -36,11 +36,11 @@ import (
 const (
 	HEARTBEAT_TIMEOUT = 100
 
-	ENABLE_HEARTBEAT_LOG = false
+	ENABLE_HEARTBEAT_LOG = true
 	ENABLE_TIMER_LOG     = false
-	ENABLE_VOTE_LOG      = false
-	ENABLE_APPEND_LOG    = false
-	ENABLE_STATE_LOG     = false
+	ENABLE_VOTE_LOG      = true
+	ENABLE_APPEND_LOG    = true
+	ENABLE_STATE_LOG     = true
 )
 
 // as each Raft peer becomes aware that successive log entries are
@@ -222,11 +222,12 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		Command: command,
 	}
 	rf.log = append(rf.log, entry)
+	rf.persist()
 	index := len(rf.log) - 1
 	term := rf.currentTerm
 	isLeader := (rf.state == LEADER)
 	if ENABLE_APPEND_LOG {
-		fmt.Printf("node %d append log at %d\n", rf.me, index)
+		fmt.Printf("node %d append log at %d in term %d\n", rf.me, index, term)
 	}
 	return index, term, isLeader
 }
@@ -379,6 +380,12 @@ func (rf *Raft) heartbeatTicker() {
 
 // send AppendEntries message to all nodes
 func (rf *Raft) sendHeartbeat() {
+	// must read old currentTerm here
+	// otherwise it will be modified by handleAppendEntriesReply
+	// and send RPC with new higher term rather than original currentTerm !!!!
+	rf.mu.Lock()
+	currentTerm := rf.currentTerm
+	rf.mu.Unlock()
 	for i := 0; i < len(rf.peers); i++ {
 		if i == rf.me {
 			continue
@@ -387,10 +394,10 @@ func (rf *Raft) sendHeartbeat() {
 			rf.mu.Lock()
 			entries := make([]Entry, 0)
 			if rf.nextIndex[i] != len(rf.log) {
-				entries = rf.log[rf.nextIndex[i]:]
+				entries = append(entries, rf.log[rf.nextIndex[i]:]...)
 			}
 			args := AppendEntriesArgs{
-				Term:         rf.currentTerm,
+				Term:         currentTerm,
 				LeaderId:     rf.me,
 				PrevLogIndex: rf.nextIndex[i] - 1,
 				PrevLogTerm:  rf.log[rf.nextIndex[i]-1].Term,
@@ -438,9 +445,9 @@ func (rf *Raft) handleAppendEntriesReply(i int, args *AppendEntriesArgs, reply *
 		return
 	}
 	if reply.Term > args.Term {
+		rf.currentTerm = reply.Term
 		if rf.state == LEADER {
 			rf.resetTimer(rf.electionTimer, true, 0)
-			rf.currentTerm = reply.Term
 			rf.state = FOLLOWER
 			rf.votedFor = -1
 			// stop heartbeat in this node
@@ -456,36 +463,44 @@ func (rf *Raft) handleAppendEntriesReply(i int, args *AppendEntriesArgs, reply *
 		rf.nextIndex[i] = rf.nextIndex[i] + len(args.Entries)
 		rf.matchIndex[i] = rf.nextIndex[i] - 1
 		// only commit entries in this term, see paper 5.4.2
-		if len(args.Entries) > 0 && args.Entries[len(args.Entries)-1].Term == rf.currentTerm {
-			// update commit index in leader
-			for i = len(rf.log) - rf.commitIndex - 1; i > 0; i-- {
-				count := 1
-				for j, index := range rf.matchIndex {
-					if j == rf.me {
-						continue
-					}
-					if index >= rf.commitIndex+i {
-						count++
-					}
-				}
-				if count > len(rf.peers)/2 {
-					rf.commitIndex = rf.commitIndex + i
-					if ENABLE_APPEND_LOG {
-						fmt.Printf("node %d update commit index %d\n", rf.me, rf.commitIndex)
-					}
-					rf.applyCond.Signal()
-					break
-				}
-			}
-		}
+		rf.updateCommitIndex()
 	} else {
-		if reply.CheckLog {
-			rf.nextIndex[i]--
-			go rf.retryHeartbeat(i)
-			if ENABLE_HEARTBEAT_LOG {
-				fmt.Printf("node %d heart beat to %d unmatched, need retry\n", rf.me, i)
+		rf.nextIndex[i]--
+		go rf.retryHeartbeat(i)
+		if ENABLE_HEARTBEAT_LOG {
+			fmt.Printf("node %d heart beat to %d unmatched, need retry\n", rf.me, i)
+		}
+	}
+}
+
+func (rf *Raft) updateCommitIndex() {
+	i := rf.commitIndex + 1
+	for ; i < len(rf.log); i++ {
+		if rf.log[i].Term < rf.currentTerm {
+			continue
+		} else {
+			count := 1
+			for j, matchedIndex := range rf.matchIndex {
+				if j == rf.me {
+					continue
+				}
+				if matchedIndex >= i {
+					count++
+				}
+			}
+			// log is replicated by more than half peers
+			if count <= len(rf.peers)/2 {
+				break
 			}
 		}
+	}
+	i--
+	if i > rf.commitIndex && rf.log[i].Term == rf.currentTerm {
+		rf.commitIndex = i
+		if ENABLE_APPEND_LOG {
+			fmt.Printf("node %d update commit index %d\n", rf.me, rf.commitIndex)
+		}
+		rf.applyCond.Signal()
 	}
 }
 
@@ -578,6 +593,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 func randomTimeout() time.Duration {
 	n, _ := rand.Int(rand.Reader, big.NewInt(150))
 	// rand.Seed(time.Now().UnixNano())
-	// election timeout 300-450
-	return time.Duration(n.Int64()) + 300
+	// election timeout 350-450
+	return time.Duration(n.Int64()) + 350
 }

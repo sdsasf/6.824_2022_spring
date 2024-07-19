@@ -1,0 +1,59 @@
+Test (2B): agreement after follower reconnects ...
+node 0 become candidate in term 2
+node 2 vote for node 0 in term 2
+node 1 vote for node 0 in term 2
+node 0 have 2 vote in term 2
+node 0 become leader in term 2
+node 0 append log at 1 in term 2
+node 2 append 1 log at 1
+node 1 append 1 log at 1
+node 0 update commit index 1
+node 2 commit log at 1
+node 1 commit log at 1
+disconnect node 1
+node 0 append log at 2 in term 2
+node 2 append 1 log at 2
+node 0 update commit index 2
+node 2 commit log at 2
+node 0 append log at 3 in term 2
+node 2 append 1 log at 3
+node 0 update commit index 3
+node 1 become candidate in term 3
+node 2 commit log at 3
+node 1 become candidate in term 4
+node 1 become candidate in term 5
+node 0 append log at 4 in term 2
+node 2 append 1 log at 4
+node 0 update commit index 4
+node 2 commit log at 4
+node 0 append log at 5 in term 2
+node 1 become candidate in term 6
+node 2 append 1 log at 5
+node 0 update commit index 5
+node 2 commit log at 5
+reconnect node 1
+node 0 append log at 6 in term 2
+node 2 append 1 log at 6
+node 1 become candidate in term 7
+node 0 become candidate in term 8
+node 2 vote for node 0 in term 8
+node 1 vote for node 0 in term 8
+node 0 have 2 vote in term 8
+node 0 become leader in term 8
+node 1 append 5 log at 2
+node 1 commit log at 5
+node 0 append log at 7 in term 8
+node 2 append 1 log at 7
+node 0 update commit index 7
+node 1 append 1 log at 7
+node 2 commit log at 7
+node 1 commit log at 7
+node 0 append log at 8 in term 8
+node 1 append 1 log at 8
+node 2 append 1 log at 8
+node 0 update commit index 8
+node 2 commit log at 8
+node 1 commit log at 8
+  ... Passed --   6.2  3  129   29929    8
+PASS
+ok  	6.824/raft	6.198s
