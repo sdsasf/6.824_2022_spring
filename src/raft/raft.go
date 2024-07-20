@@ -36,11 +36,11 @@ import (
 const (
 	HEARTBEAT_TIMEOUT = 100
 
-	ENABLE_HEARTBEAT_LOG = true
+	ENABLE_HEARTBEAT_LOG = false
 	ENABLE_TIMER_LOG     = false
-	ENABLE_VOTE_LOG      = true
-	ENABLE_APPEND_LOG    = true
-	ENABLE_STATE_LOG     = true
+	ENABLE_VOTE_LOG      = false
+	ENABLE_APPEND_LOG    = false
+	ENABLE_STATE_LOG     = false
 )
 
 // as each Raft peer becomes aware that successive log entries are

@@ -119,7 +119,19 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 		// append new logs
 		if len(args.Entries) > 0 {
-			rf.log = append(rf.log[:args.PrevLogIndex+1], args.Entries...)
+			for i := 0; i < len(args.Entries); i++ {
+				if i+1+args.PrevLogIndex < len(rf.log) {
+					if rf.log[i+1+args.PrevLogIndex].Term == args.Entries[i].Term {
+						continue
+					} else {
+						rf.log = rf.log[:i+1+args.PrevLogIndex]
+						break
+					}
+				}
+				rf.log = append(rf.log, args.Entries[i+1+args.PrevLogIndex:]...)
+				break
+			}
+			// rf.log = append(rf.log[:args.PrevLogIndex+1], args.Entries...)
 			if ENABLE_APPEND_LOG {
 				fmt.Printf("node %d append %d log at %d\n", rf.me, len(args.Entries), args.PrevLogIndex+1)
 			}
