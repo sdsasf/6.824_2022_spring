@@ -8,12 +8,14 @@ package raft
 // test with the original before submitting.
 //
 
-import "testing"
+import (
+	"sync"
+	"testing"
+)
 import "fmt"
 import "time"
 import "math/rand"
 import "sync/atomic"
-import "sync"
 
 // The tester generously allows solutions to complete elections in one second
 // (much more than the paper's range of timeouts).
@@ -813,7 +815,7 @@ func TestPersist32C(t *testing.T) {
 // iteration asks a leader, if there is one, to insert a command in the Raft
 // log.  If there is a leader, that leader will fail quickly with a high
 // probability (perhaps without committing the command), or crash after a while
-// with low probability (most likey committing the command).  If the number of
+// with low probability (most likely committing the command).  If the number of
 // alive servers isn't enough to form a majority, perhaps start a new server.
 // The leader in a new term may try to finish replicating log entries that
 // haven't been committed yet.

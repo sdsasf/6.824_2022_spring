@@ -1,7 +1,5 @@
 package raft
 
-import "fmt"
-
 // example RequestVote RPC arguments structure.
 // field names must start with capital letters!
 type RequestVoteArgs struct {
@@ -29,11 +27,13 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	if args.Term < rf.currentTerm {
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = false
+		Debug(dVote, "S%d reject requestVote in lower term (%d > %d)", rf.me, rf.currentTerm, args.Term)
 		return
 	}
 	if args.Term == rf.currentTerm && (rf.state == LEADER || rf.state == CANDIDATE) {
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = false
+		Debug(dVote, "S%d is not follower in T%d, reject requestVote", rf.me, rf.currentTerm)
 		return
 	}
 
@@ -44,20 +44,20 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.state = FOLLOWER
 		rf.currentTerm = args.Term
 		rf.votedFor = -1
+		Debug(dLeader, "S%d receive higher term requestVote in T%d, become follower", rf.me, args.Term)
 	}
 	if (rf.votedFor != -1 && rf.votedFor != args.CandidateId) ||
 		(rf.log[len(rf.log)-1].Term > args.LastLogTerm ||
 			(rf.log[len(rf.log)-1].Term == args.LastLogTerm && len(rf.log)-1 > args.LastLogIndex)) {
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = false
+		Debug(dVote, "S%d reject to vote for S%d in T%d", rf.me, args.CandidateId, rf.currentTerm)
 	} else {
 		rf.resetTimer(rf.electionTimer, true, 0)
-		if ENABLE_VOTE_LOG {
-			fmt.Printf("node %d vote for node %d in term %d\n", rf.me, args.CandidateId, rf.currentTerm)
-		}
 		rf.votedFor = args.CandidateId
 		reply.Term = args.Term
 		reply.VoteGranted = true
+		Debug(dVote, "S%d vote for S%d in T%d", rf.me, args.CandidateId, rf.currentTerm)
 	}
 	rf.persist()
 }
@@ -74,6 +74,9 @@ type AppendEntriesArgs struct {
 type AppendEntriesReply struct {
 	Term    int
 	Success bool
+	// for accelerated log backtracking optimization
+	ConflictIndex int
+	ConflictTerm  int
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
@@ -89,28 +92,39 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	// reset election timeout
 	rf.resetTimer(rf.electionTimer, true, 0)
-	if ENABLE_HEARTBEAT_LOG {
-		fmt.Printf("node %d receive heartbeat from node %d in term %d\n", rf.me, args.LeaderId, rf.currentTerm)
-	}
+	Debug(dTimer, "S%d receive heartbeat from S%d, reset election timer", rf.me, args.LeaderId)
 
+	needPersist := false
 	if args.Term > rf.currentTerm {
 		// outdated leader
 		if rf.state == LEADER {
 			// should stop heartbeat
 			rf.stopHeartbeatCh <- struct{}{}
 		}
+		Debug(dLog, "S%d receive higher term heartbeat (%d > %d) from S%d, become follower",
+			rf.me, args.Term, rf.currentTerm, args.LeaderId)
 		rf.currentTerm = args.Term
 		rf.votedFor = -1
 		rf.state = FOLLOWER
 
-		if ENABLE_STATE_LOG {
-			fmt.Printf("node %d become follower in term %d\n", rf.me, rf.currentTerm)
-		}
-
-		// check prevLogIndex and prevLog
+		// check prevLogIndex and prevLogTerm
 		if (len(rf.log)-1 < args.PrevLogIndex) || (rf.log[args.PrevLogIndex].Term != args.PrevLogTerm) {
 			reply.Term = rf.currentTerm
 			reply.Success = false
+			if len(rf.log)-1 < args.PrevLogIndex {
+				reply.ConflictTerm = 0
+				reply.ConflictIndex = len(rf.log)
+			} else {
+				reply.ConflictTerm = rf.log[args.PrevLogIndex].Term
+				i := args.PrevLogIndex
+				for i > 0 && rf.log[i].Term == rf.log[args.PrevLogIndex].Term {
+					i--
+				}
+				reply.ConflictIndex = i + 1
+			}
+			Debug(dLog, "S%d reject appendEntry from S%d in T%d, ConflictTerm is %d ConflictIndex is %d",
+				rf.me, args.LeaderId, rf.currentTerm, reply.ConflictTerm, reply.ConflictIndex)
+			rf.persist()
 			return
 		}
 		// prevLogIndex and prevLog is right
@@ -125,16 +139,14 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 						continue
 					} else {
 						rf.log = rf.log[:i+1+args.PrevLogIndex]
-						break
 					}
 				}
-				rf.log = append(rf.log, args.Entries[i+1+args.PrevLogIndex:]...)
+				rf.log = append(rf.log, args.Entries[i:]...)
 				break
 			}
 			// rf.log = append(rf.log[:args.PrevLogIndex+1], args.Entries...)
-			if ENABLE_APPEND_LOG {
-				fmt.Printf("node %d append %d log at %d\n", rf.me, len(args.Entries), args.PrevLogIndex+1)
-			}
+			Debug(dLog, "S%d grant appendEntry from S%d in T%d, append %d log at %d",
+				rf.me, args.LeaderId, rf.currentTerm, len(args.Entries), args.PrevLogIndex+1)
 		}
 
 		// update commit index
@@ -144,9 +156,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			} else {
 				rf.commitIndex = len(rf.log) - 1
 			}
-			if ENABLE_APPEND_LOG {
-				fmt.Printf("node %d commit log at %d\n", rf.me, rf.commitIndex)
-			}
+			Debug(dCommit, "S%d update commitIndex to %d in T%d", rf.me, rf.commitIndex, rf.currentTerm)
 			rf.applyCond.Signal()
 		}
 		rf.persist()
@@ -157,10 +167,20 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		} else {
 			// normal heartbeat, rf.state must FOLLOWER
 			// check prevLogIndex and prevLog
-			if (len(rf.log)-1 < args.PrevLogIndex) ||
-				(args.PrevLogIndex != -1 && rf.log[args.PrevLogIndex].Term != args.PrevLogTerm) {
+			if (len(rf.log)-1 < args.PrevLogIndex) || rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
 				reply.Term = rf.currentTerm
 				reply.Success = false
+				if len(rf.log)-1 < args.PrevLogIndex {
+					reply.ConflictTerm = 0
+					reply.ConflictIndex = len(rf.log)
+				} else {
+					reply.ConflictTerm = rf.log[args.PrevLogIndex].Term
+					i := args.PrevLogIndex
+					for i > 0 && rf.log[i].Term == rf.log[args.PrevLogIndex].Term {
+						i--
+					}
+					reply.ConflictIndex = i + 1
+				}
 				return
 			}
 			reply.Term = rf.currentTerm
@@ -168,10 +188,20 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 			// append new logs
 			if len(args.Entries) > 0 {
-				rf.log = append(rf.log[:args.PrevLogIndex+1], args.Entries...)
-				if ENABLE_APPEND_LOG {
-					fmt.Printf("node %d append %d log at %d\n", rf.me, len(args.Entries), args.PrevLogIndex+1)
+				for i := 0; i < len(args.Entries); i++ {
+					if i+1+args.PrevLogIndex < len(rf.log) {
+						if rf.log[i+1+args.PrevLogIndex].Term == args.Entries[i].Term {
+							continue
+						} else {
+							rf.log = rf.log[:i+1+args.PrevLogIndex]
+						}
+					}
+					rf.log = append(rf.log, args.Entries[i:]...)
+					break
 				}
+				needPersist = true
+				Debug(dLog, "S%d grant appendEntry from S%d in T%d, append %d log at %d",
+					rf.me, args.LeaderId, rf.currentTerm, len(args.Entries), args.PrevLogIndex+1)
 			}
 
 			// update commit index
@@ -181,13 +211,13 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 				} else {
 					rf.commitIndex = len(rf.log) - 1
 				}
-				if ENABLE_APPEND_LOG {
-					fmt.Printf("node %d commit log at %d\n", rf.me, rf.commitIndex)
-				}
+				Debug(dCommit, "S%d update commitIndex to %d in T%d", rf.me, rf.commitIndex, rf.currentTerm)
 				rf.applyCond.Signal()
 			}
 		}
-		rf.persist()
+		if needPersist {
+			rf.persist()
+		}
 	}
 }
 

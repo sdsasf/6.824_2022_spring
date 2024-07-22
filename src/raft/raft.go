@@ -21,7 +21,6 @@ import (
 	"6.824/labgob"
 	"bytes"
 	"crypto/rand"
-	"fmt"
 	"math/big"
 	"time"
 
@@ -34,7 +33,7 @@ import (
 )
 
 const (
-	HEARTBEAT_TIMEOUT = 100
+	HEARTBEAT_TIMEOUT = 60
 
 	ENABLE_HEARTBEAT_LOG = false
 	ENABLE_TIMER_LOG     = false
@@ -222,13 +221,13 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		Command: command,
 	}
 	rf.log = append(rf.log, entry)
+	Debug(dClient, "S%d append command %d at index %d in T%d",
+		rf.me, entry.Command, len(rf.log)-1, rf.currentTerm)
+	go rf.sendHeartbeat()
 	rf.persist()
 	index := len(rf.log) - 1
 	term := rf.currentTerm
 	isLeader := (rf.state == LEADER)
-	if ENABLE_APPEND_LOG {
-		fmt.Printf("node %d append log at %d in term %d\n", rf.me, index, term)
-	}
 	return index, term, isLeader
 }
 
@@ -279,9 +278,8 @@ func (rf *Raft) electLeader() {
 		return
 	}
 	rf.becomeCandidate()
-	if ENABLE_STATE_LOG {
-		fmt.Printf("node %d become candidate in term %d\n", rf.me, rf.currentTerm)
-	}
+	Debug(dVote, "S%d become candidate in T%d", rf.me, rf.currentTerm)
+	rf.persist()
 	lastLogIndex := len(rf.log) - 1
 	lastLogTerm := rf.log[lastLogIndex].Term
 	currentTerm := rf.currentTerm
@@ -308,10 +306,15 @@ func (rf *Raft) electLeader() {
 			rf.mu.Lock()
 			defer rf.mu.Unlock()
 			if rf.currentTerm < reply.Term {
+				Debug(dVote,
+					"S%d Term is lower than S%d, Candidate change to Follower (%d < %d)",
+					rf.me, i, args.Term, rf.currentTerm)
 				rf.state = FOLLOWER
 				rf.currentTerm = reply.Term
 				rf.votedFor = -1
+				rf.persist()
 				rf.resetTimer(rf.electionTimer, true, 0)
+				Debug(dTimer, "S%d reset election timer", rf.me)
 				return
 			}
 			if rf.state != CANDIDATE || args.Term != rf.currentTerm {
@@ -319,16 +322,16 @@ func (rf *Raft) electLeader() {
 				return
 			}
 			if reply.VoteGranted {
+				Debug(dVote, "S%d receive granted vote from S%d in T%d", rf.me, i, rf.currentTerm)
 				_, exist := rf.votes[i]
 				oldLen := len(rf.votes)
 				if !exist {
 					rf.votes[i] = true
-					if ENABLE_VOTE_LOG {
-						fmt.Printf("node %d have %d vote in term %d\n", rf.me, len(rf.votes), rf.currentTerm)
-					}
 				}
 				if (oldLen <= len(rf.peers)/2) && (len(rf.votes) > len(rf.peers)/2) {
 					rf.becomeLeader()
+					Debug(dLeader,
+						"S%d receive %d votes in T%d, become leader", rf.me, len(rf.votes), rf.currentTerm)
 				}
 			}
 		}(i)
@@ -347,10 +350,6 @@ func (rf *Raft) becomeLeader() {
 	rf.matchIndex[rf.me] = nextIndex - 1
 
 	go rf.heartbeatTicker()
-
-	if ENABLE_STATE_LOG {
-		fmt.Printf("node %d become leader in term %d\n", rf.me, rf.currentTerm)
-	}
 }
 
 func (rf *Raft) becomeCandidate() {
@@ -370,10 +369,8 @@ func (rf *Raft) heartbeatTicker() {
 		case <-rf.heartbeatTimer.C:
 			rf.resetTimer(rf.heartbeatTimer, false, HEARTBEAT_TIMEOUT)
 			go rf.sendHeartbeat()
-			if ENABLE_HEARTBEAT_LOG {
-				term := rf.currentTerm
-				fmt.Printf("node %d send heartbeat in term %d\n", rf.me, term)
-			}
+			// term := rf.currentTerm
+			// Debug(dLeader, "S%d send heartbeat in T%d", rf.me, term)
 		}
 	}
 }
@@ -392,8 +389,12 @@ func (rf *Raft) sendHeartbeat() {
 		}
 		go func(i int) {
 			rf.mu.Lock()
+			if rf.state != LEADER {
+				rf.mu.Unlock()
+				return
+			}
 			entries := make([]Entry, 0)
-			if rf.nextIndex[i] != len(rf.log) {
+			if rf.nextIndex[i] < len(rf.log) {
 				entries = append(entries, rf.log[rf.nextIndex[i]:]...)
 			}
 			args := AppendEntriesArgs{
@@ -407,6 +408,7 @@ func (rf *Raft) sendHeartbeat() {
 			rf.mu.Unlock()
 			reply := AppendEntriesReply{}
 			ok := rf.sendAppendEntries(i, &args, &reply)
+			// Debug(dLeader, "S%d send heartbeat to S%d in T%d", rf.me, i, rf.currentTerm)
 			if !ok {
 				return
 			}
@@ -417,6 +419,10 @@ func (rf *Raft) sendHeartbeat() {
 
 func (rf *Raft) retryHeartbeat(i int) {
 	rf.mu.Lock()
+	if rf.state != LEADER {
+		rf.mu.Unlock()
+		return
+	}
 	args := AppendEntriesArgs{
 		Term:         rf.currentTerm,
 		LeaderId:     rf.me,
@@ -427,10 +433,8 @@ func (rf *Raft) retryHeartbeat(i int) {
 	}
 	rf.mu.Unlock()
 	reply := AppendEntriesReply{Term: 0}
-	if ENABLE_HEARTBEAT_LOG {
-		fmt.Printf("node %d retry heartbeat to node %d\n", rf.me, i)
-	}
 	ok := rf.sendAppendEntries(i, &args, &reply)
+	Debug(dLeader, "S%d retry heartbeat to S%d in T%d", rf.me, i, rf.currentTerm)
 	if !ok {
 		return
 	}
@@ -441,39 +445,57 @@ func (rf *Raft) handleAppendEntriesReply(i int, args *AppendEntriesArgs, reply *
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	if reply.Term == 0 {
+	if reply.Term == 0 || rf.state != LEADER {
 		return
 	}
 	if reply.Term > args.Term {
 		rf.currentTerm = reply.Term
+		rf.persist()
 		if rf.state == LEADER {
 			rf.resetTimer(rf.electionTimer, true, 0)
 			rf.state = FOLLOWER
-			rf.votedFor = -1
 			// stop heartbeat in this node
 			rf.stopHeartbeatCh <- struct{}{}
-			if ENABLE_HEARTBEAT_LOG {
-				fmt.Printf("node %d stop heartbeat\n", rf.me)
-			}
+			rf.votedFor = -1
+			rf.persist()
+			Debug(dLeader, "S%d receive higher term requestVoteReply (%d > %d), become follower",
+				rf.me, reply.Term, args.Term)
 		}
 		return
 	}
 
 	if reply.Success {
-		rf.nextIndex[i] = rf.nextIndex[i] + len(args.Entries)
+		// rf.nextIndex[i] = rf.nextIndex[i] + len(args.Entries)
+		rf.nextIndex[i] = args.PrevLogIndex + len(args.Entries) + 1
 		rf.matchIndex[i] = rf.nextIndex[i] - 1
+		Debug(dLog, "S%d receive granted appendEntryReply from S%d in T%d, nextIndex is %d",
+			rf.me, i, rf.currentTerm, rf.nextIndex[i])
 		// only commit entries in this term, see paper 5.4.2
-		rf.updateCommitIndex()
-	} else {
-		rf.nextIndex[i]--
-		go rf.retryHeartbeat(i)
-		if ENABLE_HEARTBEAT_LOG {
-			fmt.Printf("node %d heart beat to %d unmatched, need retry\n", rf.me, i)
+		if rf.updateCommitIndex() {
+			// for efficiency
+			go rf.sendHeartbeat()
 		}
+	} else {
+		if reply.ConflictTerm == 0 {
+			rf.nextIndex[i] = reply.ConflictIndex
+		} else {
+			j := args.PrevLogIndex
+			for j > 0 && rf.log[j].Term == args.PrevLogTerm {
+				j--
+			}
+			if j == 0 {
+				rf.nextIndex[i] = reply.ConflictIndex
+			} else {
+				rf.nextIndex[i] = j + 1
+			}
+		}
+		Debug(dLog, "S%d receive reject appendEntryReply from S%d in T%d, nextIndex is %d",
+			rf.me, i, rf.currentTerm, rf.nextIndex[i])
+		go rf.retryHeartbeat(i)
 	}
 }
 
-func (rf *Raft) updateCommitIndex() {
+func (rf *Raft) updateCommitIndex() bool {
 	i := rf.commitIndex + 1
 	for ; i < len(rf.log); i++ {
 		if rf.log[i].Term < rf.currentTerm {
@@ -497,11 +519,11 @@ func (rf *Raft) updateCommitIndex() {
 	i--
 	if i > rf.commitIndex && rf.log[i].Term == rf.currentTerm {
 		rf.commitIndex = i
-		if ENABLE_APPEND_LOG {
-			fmt.Printf("node %d update commit index %d\n", rf.me, rf.commitIndex)
-		}
+		Debug(dCommit, "S%d commit log at index %d in T%d", rf.me, rf.commitIndex, rf.currentTerm)
 		rf.applyCond.Signal()
+		return true
 	}
+	return false
 }
 
 func (rf *Raft) resetTimer(timer *time.Timer, needRandom bool, duration time.Duration) {
@@ -515,9 +537,7 @@ func (rf *Raft) resetTimer(timer *time.Timer, needRandom bool, duration time.Dur
 	if needRandom {
 		randomTimeout := randomTimeout()
 		timer.Reset(randomTimeout * time.Millisecond)
-		if ENABLE_TIMER_LOG {
-			fmt.Printf("node %d reset election timeout %d\n", rf.me, randomTimeout)
-		}
+		Debug(dTimer, "S%d reset election timeout %d", rf.me, randomTimeout)
 	} else {
 		timer.Reset(duration * time.Millisecond)
 	}
@@ -573,7 +593,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.stopHeartbeatCh = make(chan struct{})
 	rf.state = FOLLOWER
 	rf.votedFor = -1
-	rf.log = make([]Entry, 1)
+	rf.log = []Entry{{Term: 0, Command: 0}}
 	rf.currentTerm = 1
 	rf.commitIndex = 0
 	rf.lastApplied = 0
@@ -591,8 +611,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 }
 
 func randomTimeout() time.Duration {
-	n, _ := rand.Int(rand.Reader, big.NewInt(150))
+	n, _ := rand.Int(rand.Reader, big.NewInt(130))
 	// rand.Seed(time.Now().UnixNano())
-	// election timeout 350-450
+	// election timeout 350-480
 	return time.Duration(n.Int64()) + 350
 }
