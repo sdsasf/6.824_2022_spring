@@ -47,8 +47,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		Debug(dLeader, "S%d receive higher term requestVote in T%d, become follower", rf.me, args.Term)
 	}
 	if (rf.votedFor != -1 && rf.votedFor != args.CandidateId) ||
-		(rf.log[len(rf.log)-1].Term > args.LastLogTerm ||
-			(rf.log[len(rf.log)-1].Term == args.LastLogTerm && len(rf.log)-1 > args.LastLogIndex)) {
+		(rf.lastLogTerm() > args.LastLogTerm ||
+			(rf.lastLogTerm() == args.LastLogTerm && rf.lastLogIndex() > args.LastLogIndex)) {
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = false
 		Debug(dVote, "S%d reject to vote for S%d in T%d", rf.me, args.CandidateId, rf.currentTerm)
@@ -105,45 +105,54 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			rf.me, args.Term, rf.currentTerm, args.LeaderId)
 		rf.currentTerm = args.Term
 		rf.votedFor = -1
-		rf.state = FOLLOWER
+		needPersist = true
+	}
+	rf.state = FOLLOWER
 
-		// check prevLogIndex and prevLogTerm
-		if (len(rf.log)-1 < args.PrevLogIndex) || (rf.log[args.PrevLogIndex].Term != args.PrevLogTerm) {
-			reply.Term = rf.currentTerm
-			reply.Success = false
-			if len(rf.log)-1 < args.PrevLogIndex {
-				reply.ConflictTerm = 0
-				reply.ConflictIndex = len(rf.log)
-			} else {
-				reply.ConflictTerm = rf.log[args.PrevLogIndex].Term
-				i := args.PrevLogIndex
-				for i > 0 && rf.log[i].Term == rf.log[args.PrevLogIndex].Term {
-					i--
-				}
-				reply.ConflictIndex = i + 1
-			}
-			Debug(dLog, "S%d reject appendEntry from S%d in T%d, ConflictTerm is %d ConflictIndex is %d",
-				rf.me, args.LeaderId, rf.currentTerm, reply.ConflictTerm, reply.ConflictIndex)
+	reply.Term = args.Term
+	prevLogIndex, exist := rf.convertIndex(args.PrevLogIndex)
+	// check prevLogIndex and prevLogTerm
+	if !exist {
+		// if prevLogIndex not in log
+		Debug(dLog, "S%d don't have prevLogIndex %d in it's log, reject heartbeat", rf.me, args.PrevLogIndex)
+		reply.Success = false
+		reply.ConflictTerm = 0
+		reply.ConflictIndex = rf.lastLogIndex() + 1
+		if needPersist {
 			rf.persist()
-			return
 		}
-		// prevLogIndex and prevLog is right
-		reply.Term = rf.currentTerm
+		return
+	}
+	// if prevLogIndex in log
+	if rf.log[prevLogIndex].Term != args.PrevLogTerm {
+		// term conflict at the same index
+		reply.ConflictTerm = rf.log[prevLogIndex].Term
+		i := prevLogIndex
+		for i > 0 && rf.log[i].Term == reply.ConflictTerm {
+			i--
+		}
+		reply.ConflictIndex = rf.log[i+1].Index
+		Debug(dLog, "S%d log at prevLogIndex %d term unmatched (%d != %d), ConflictIndex %d",
+			rf.me, args.PrevLogIndex, rf.log[prevLogIndex].Term, args.PrevLogTerm, reply.ConflictIndex)
+		reply.Success = false
+	} else {
+		// prevLogIndex and prevLogTerm matching
 		reply.Success = true
-
 		// append new logs
 		if len(args.Entries) > 0 {
 			for i := 0; i < len(args.Entries); i++ {
-				if i+1+args.PrevLogIndex < len(rf.log) {
-					if rf.log[i+1+args.PrevLogIndex].Term == args.Entries[i].Term {
+				if i+1+prevLogIndex < len(rf.log) {
+					if rf.log[i+1+prevLogIndex].Term == args.Entries[i].Term {
 						continue
 					} else {
-						rf.log = rf.log[:i+1+args.PrevLogIndex]
+						rf.log = rf.log[:i+1+prevLogIndex]
 					}
 				}
 				rf.log = append(rf.log, args.Entries[i:]...)
+				needPersist = true
 				break
 			}
+			// don't truncate log directly !!!
 			// rf.log = append(rf.log[:args.PrevLogIndex+1], args.Entries...)
 			Debug(dLog, "S%d grant appendEntry from S%d in T%d, append %d log at %d",
 				rf.me, args.LeaderId, rf.currentTerm, len(args.Entries), args.PrevLogIndex+1)
@@ -151,74 +160,33 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 		// update commit index
 		if args.LeaderCommit > rf.commitIndex {
-			if args.LeaderCommit < len(rf.log)-1 {
+			if args.LeaderCommit <= rf.lastLogIndex() {
 				rf.commitIndex = args.LeaderCommit
 			} else {
-				rf.commitIndex = len(rf.log) - 1
+				rf.commitIndex = rf.lastLogIndex()
 			}
 			Debug(dCommit, "S%d update commitIndex to %d in T%d", rf.me, rf.commitIndex, rf.currentTerm)
-			rf.applyCond.Signal()
-		}
-		rf.persist()
-	} else {
-		// heartbeat term is equal to current term
-		if rf.state == CANDIDATE {
-			rf.state = FOLLOWER
-		} else {
-			// normal heartbeat, rf.state must FOLLOWER
-			// check prevLogIndex and prevLog
-			if (len(rf.log)-1 < args.PrevLogIndex) || rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
-				reply.Term = rf.currentTerm
-				reply.Success = false
-				if len(rf.log)-1 < args.PrevLogIndex {
-					reply.ConflictTerm = 0
-					reply.ConflictIndex = len(rf.log)
-				} else {
-					reply.ConflictTerm = rf.log[args.PrevLogIndex].Term
-					i := args.PrevLogIndex
-					for i > 0 && rf.log[i].Term == rf.log[args.PrevLogIndex].Term {
-						i--
-					}
-					reply.ConflictIndex = i + 1
-				}
-				return
-			}
-			reply.Term = rf.currentTerm
-			reply.Success = true
-
-			// append new logs
-			if len(args.Entries) > 0 {
-				for i := 0; i < len(args.Entries); i++ {
-					if i+1+args.PrevLogIndex < len(rf.log) {
-						if rf.log[i+1+args.PrevLogIndex].Term == args.Entries[i].Term {
-							continue
-						} else {
-							rf.log = rf.log[:i+1+args.PrevLogIndex]
-						}
-					}
-					rf.log = append(rf.log, args.Entries[i:]...)
-					break
-				}
-				needPersist = true
-				Debug(dLog, "S%d grant appendEntry from S%d in T%d, append %d log at %d",
-					rf.me, args.LeaderId, rf.currentTerm, len(args.Entries), args.PrevLogIndex+1)
-			}
-
-			// update commit index
-			if args.LeaderCommit > rf.commitIndex {
-				if args.LeaderCommit < len(rf.log)-1 {
-					rf.commitIndex = args.LeaderCommit
-				} else {
-					rf.commitIndex = len(rf.log) - 1
-				}
-				Debug(dCommit, "S%d update commitIndex to %d in T%d", rf.me, rf.commitIndex, rf.currentTerm)
+			if rf.commitIndex > rf.lastApplied {
 				rf.applyCond.Signal()
 			}
 		}
-		if needPersist {
-			rf.persist()
-		}
 	}
+
+	if needPersist {
+		rf.persist()
+	}
+}
+
+type InstallSnapshotArgs struct {
+	Term              int
+	LeaderId          int
+	LastIncludedIndex int
+	LastIncludedTerm  int
+	data              []byte
+}
+
+type InstallSnapshotReply struct {
+	Term int
 }
 
 // example code to send a RequestVote RPC to a server.
