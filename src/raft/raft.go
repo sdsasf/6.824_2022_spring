@@ -266,6 +266,7 @@ func (rf *Raft) leaderInstallSnapshot(i int) {
 	if reply.Term > rf.currentTerm {
 		rf.currentTerm = reply.Term
 		rf.state = FOLLOWER
+		rf.stopHeartbeatCh <- struct{}{}
 		rf.votedFor = -1
 		rf.persist()
 		return
@@ -599,7 +600,10 @@ func (rf *Raft) handleAppendEntriesReply(i int, args *AppendEntriesArgs, reply *
 			rf.me, i, rf.currentTerm, rf.nextIndex[i])
 		// only commit entries in this term, see paper 5.4.2
 		if len(args.Entries) > 0 {
-			rf.updateCommitIndex()
+			if rf.updateCommitIndex() {
+				// make leader fast commit logs, 2D testSpeed need
+				go rf.sendHeartbeat()
+			}
 		}
 	} else {
 		if reply.ConflictTerm == 0 {
@@ -729,7 +733,7 @@ func (rf *Raft) convertIndex(index int) (int, bool) {
 		return -1, true
 	}
 	if index == rf.snapshotData.lastIncludedIndex {
-		return rf.snapshotData.lastIncludedIndex, true
+		return -1, true
 	}
 	if len(rf.log) == 0 {
 		return -1, false

@@ -24,6 +24,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
+	Debug(dVote, "S%d receive requestVote", rf.me)
 	if args.Term < rf.currentTerm {
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = false
@@ -44,7 +45,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.state = FOLLOWER
 		rf.currentTerm = args.Term
 		rf.votedFor = -1
-		Debug(dLeader, "S%d receive higher term requestVote in T%d, become follower", rf.me, args.Term)
+		Debug(dVote, "S%d receive higher term requestVote in T%d, become follower", rf.me, args.Term)
 	}
 	if (rf.votedFor != -1 && rf.votedFor != args.CandidateId) ||
 		(rf.lastLogTerm() > args.LastLogTerm ||
