@@ -85,6 +85,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// check term
 	if args.Term < rf.currentTerm {
 		// outdated leader heartbeat, return high term directly
+		Debug(dLog, "S%d reject outdated appendEntries from S%d, (%d > %d)",
+			rf.me, args.LeaderId, rf.currentTerm, args.Term)
 		reply.Term = rf.currentTerm
 		reply.Success = false
 		return
@@ -92,7 +94,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	// reset election timeout
 	rf.resetTimer(rf.electionTimer, true, 0)
-	Debug(dTimer, "S%d receive heartbeat from S%d, reset election timer", rf.me, args.LeaderId)
+	Debug(dLog, "S%d receive heartbeat from S%d", rf.me, args.LeaderId)
 
 	needPersist := false
 	if args.Term > rf.currentTerm {
@@ -101,7 +103,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			// should stop heartbeat
 			rf.stopHeartbeatCh <- struct{}{}
 		}
-		Debug(dLog, "S%d receive higher term heartbeat (%d > %d) from S%d, become follower",
+		Debug(dLog, "S%d receive higher term heartbeat (%d > %d) from S%d",
 			rf.me, args.Term, rf.currentTerm, args.LeaderId)
 		rf.currentTerm = args.Term
 		rf.votedFor = -1
@@ -110,7 +112,13 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.state = FOLLOWER
 
 	reply.Term = args.Term
-	prevLogIndex, exist := rf.convertIndex(args.PrevLogIndex)
+	var prevLogIndex int
+	exist := true
+	if args.PrevLogIndex == rf.snapshotData.lastIncludedIndex {
+		prevLogIndex = -1
+	} else {
+		prevLogIndex, exist = rf.convertIndex(args.PrevLogIndex)
+	}
 	// check prevLogIndex and prevLogTerm
 	if !exist {
 		// if prevLogIndex not in log
@@ -123,15 +131,16 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		}
 		return
 	}
-	// if prevLogIndex in log
-	if rf.log[prevLogIndex].Term != args.PrevLogTerm {
-		// term conflict at the same index
+	// if prevLogIndex in log or have no log in leader
+	if prevLogIndex != -1 && rf.log[prevLogIndex].Term != args.PrevLogTerm {
+		// if term conflict at the same index
 		reply.ConflictTerm = rf.log[prevLogIndex].Term
 		i := prevLogIndex
 		for i > 0 && rf.log[i].Term == reply.ConflictTerm {
 			i--
 		}
-		reply.ConflictIndex = rf.log[i+1].Index
+		//reply.ConflictIndex = rf.log[i+1].Index
+		reply.ConflictIndex = rf.log[i].Index
 		Debug(dLog, "S%d log at prevLogIndex %d term unmatched (%d != %d), ConflictIndex %d",
 			rf.me, args.PrevLogIndex, rf.log[prevLogIndex].Term, args.PrevLogTerm, reply.ConflictIndex)
 		reply.Success = false
@@ -182,11 +191,64 @@ type InstallSnapshotArgs struct {
 	LeaderId          int
 	LastIncludedIndex int
 	LastIncludedTerm  int
-	data              []byte
+	Data              []byte
 }
 
 type InstallSnapshotReply struct {
 	Term int
+}
+
+func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	if args.Term < rf.currentTerm {
+		reply.Term = rf.currentTerm
+		return
+	}
+	needPersist := false
+	rf.resetTimer(rf.electionTimer, true, 0)
+	rf.state = FOLLOWER
+	if args.Term > rf.currentTerm {
+		rf.currentTerm = args.Term
+		rf.votedFor = -1
+		needPersist = true
+	}
+	reply.Term = rf.currentTerm
+	if args.LastIncludedIndex <= rf.snapshotData.lastIncludedIndex {
+		// outdated snapshot
+		if needPersist {
+			rf.persist()
+		}
+		return
+	}
+	// update state in Raft
+	i, _ := rf.convertIndex(args.LastIncludedIndex)
+	rf.snapshotData.lastIncludedIndex = args.LastIncludedIndex
+	rf.snapshotData.lastIncludedTerm = args.LastIncludedTerm
+	rf.snapshotData.currentSnapshot = args.Data
+	// trim log before index (include index)
+	newLog := make([]Entry, 0)
+	for i = i + 1; i < len(rf.log); i++ {
+		newLog = append(newLog, rf.log[i])
+	}
+	rf.log = newLog
+	rf.lastApplied = args.LastIncludedIndex
+	rf.commitIndex = args.LastIncludedIndex
+	raftState := rf.persistRaftState()
+	rf.persister.SaveStateAndSnapshot(raftState, args.Data)
+	Debug(dSnap, "S%d accept snapshot from S%d", rf.me, args.LeaderId)
+
+	rf.snapshotApplyMsg = ApplyMsg{
+		CommandValid:  false,
+		Command:       nil,
+		CommandIndex:  0,
+		SnapshotValid: true,
+		Snapshot:      args.Data,
+		SnapshotTerm:  args.LastIncludedTerm,
+		SnapshotIndex: args.LastIncludedIndex,
+	}
+	rf.applyCond.Signal()
 }
 
 // example code to send a RequestVote RPC to a server.
@@ -223,5 +285,10 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
+	return ok
+}
+
+func (rf *Raft) sendInstallSnapshot(server int, args *InstallSnapshotArgs, reply *InstallSnapshotReply) bool {
+	ok := rf.peers[server].Call("Raft.InstallSnapshot", args, reply)
 	return ok
 }
