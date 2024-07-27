@@ -211,12 +211,16 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	rf.resetTimer(rf.electionTimer, true, 0)
 	rf.state = FOLLOWER
 	if args.Term > rf.currentTerm {
+		// don't forget stop heartbeat !!!
+		if rf.state == LEADER {
+			rf.stopHeartbeatCh <- struct{}{}
+		}
 		rf.currentTerm = args.Term
 		rf.votedFor = -1
 		needPersist = true
 	}
 	reply.Term = rf.currentTerm
-	if args.LastIncludedIndex <= rf.snapshotData.lastIncludedIndex {
+	if args.LastIncludedIndex <= rf.snapshotData.lastIncludedIndex || args.LastIncludedIndex <= rf.commitIndex {
 		// outdated snapshot
 		if needPersist {
 			rf.persist()
@@ -230,12 +234,14 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	rf.snapshotData.currentSnapshot = args.Data
 	// trim log before index (include index)
 	newLog := make([]Entry, 0)
-	for i = i + 1; i < len(rf.log); i++ {
-		newLog = append(newLog, rf.log[i])
+	if i+1 < len(rf.log) {
+		newLog = append(newLog, rf.log[i+1:]...)
 	}
 	rf.log = newLog
-	rf.lastApplied = args.LastIncludedIndex
-	rf.commitIndex = args.LastIncludedIndex
+	if args.LastIncludedIndex > rf.commitIndex {
+		rf.lastApplied = args.LastIncludedIndex
+		rf.commitIndex = args.LastIncludedIndex
+	}
 	raftState := rf.persistRaftState()
 	rf.persister.SaveStateAndSnapshot(raftState, args.Data)
 	Debug(dSnap, "S%d accept snapshot from S%d", rf.me, args.LeaderId)

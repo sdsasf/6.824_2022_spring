@@ -1173,7 +1173,7 @@ func snapcommon(t *testing.T, name string, disconnect bool, reliable bool, crash
 		if crash {
 			cfg.start1(victim, cfg.applierSnap)
 			cfg.connect(victim)
-			Debug(dError, "S%d disconnected", victim)
+			Debug(dError, "S%d recover from crash", victim)
 			cfg.one(rand.Int(), servers, true)
 			leader1 = cfg.checkOneLeader()
 		}
@@ -1227,12 +1227,14 @@ func TestSnapshotAllCrash2D(t *testing.T) {
 		// crash all
 		for i := 0; i < servers; i++ {
 			cfg.crash1(i)
+			Debug(dError, "S%d crash", i)
 		}
 
 		// revive all
 		for i := 0; i < servers; i++ {
 			cfg.start1(i, cfg.applierSnap)
 			cfg.connect(i)
+			Debug(dError, "S%d recover from crash", i)
 		}
 
 		index2 := cfg.one(rand.Int(), servers, true)

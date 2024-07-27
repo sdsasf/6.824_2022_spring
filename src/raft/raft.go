@@ -217,7 +217,7 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 		return
 	}
 	if index > rf.commitIndex || index <= rf.snapshotData.lastIncludedIndex {
-		Debug(dSnap, "S%d reject snapshot at index %d", rf.me, index)
+		Debug(dSnap, "S%d reject snapshot service at index %d", rf.me, index)
 		return
 	}
 	// update state in Raft
@@ -243,7 +243,6 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 
 func (rf *Raft) leaderInstallSnapshot(i int) {
 	rf.mu.Lock()
-	defer rf.mu.Unlock()
 
 	if rf.state != LEADER {
 		return
@@ -257,15 +256,20 @@ func (rf *Raft) leaderInstallSnapshot(i int) {
 		Data:              rf.snapshotData.currentSnapshot,
 	}
 	reply := InstallSnapshotReply{}
-	Debug(dSnap, "S%d send snapshot to S%d, nextIndex is %d lastIncludedIndex is %d",
+	Debug(dSnap, "S%d send snapshot to S%d, nextIdx is %d lastIncludedIdx is %d",
 		rf.me, i, rf.nextIndex[i], rf.snapshotData.lastIncludedIndex)
+	rf.mu.Unlock()
+	// don't send RPC with lock !!!
 	ok := rf.sendInstallSnapshot(i, &args, &reply)
 	if !ok {
 		return
 	}
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	if reply.Term > rf.currentTerm {
 		rf.currentTerm = reply.Term
 		rf.state = FOLLOWER
+		// don't forget stop heartbeat !!!
 		rf.stopHeartbeatCh <- struct{}{}
 		rf.votedFor = -1
 		rf.persist()
@@ -382,6 +386,7 @@ func (rf *Raft) electLeader() {
 				LastLogTerm:  lastLogTerm,
 			}
 			reply := RequestVoteReply{}
+			// don't send RPC with lock !!!
 			ok := rf.sendRequestVote(i, &args, &reply)
 			if !ok {
 				return
@@ -514,6 +519,7 @@ func (rf *Raft) sendHeartbeat() {
 			}
 			rf.mu.Unlock()
 			reply := AppendEntriesReply{}
+			// don't send RPC with lock !!!
 			ok := rf.sendAppendEntries(i, &args, &reply)
 			// Debug(dLeader, "S%d send heartbeat to S%d in T%d", rf.me, i, rf.currentTerm)
 			if !ok {
@@ -560,10 +566,11 @@ func (rf *Raft) retryHeartbeat(i int) {
 		Entries:      entries,
 		LeaderCommit: rf.commitIndex,
 	}
+	Debug(dLeader, "S%d retry heartbeat to S%d in T%d", rf.me, i, rf.currentTerm)
 	rf.mu.Unlock()
 	reply := AppendEntriesReply{Term: 0}
+	// don't send RPC with lock !!!
 	ok := rf.sendAppendEntries(i, &args, &reply)
-	Debug(dLeader, "S%d retry heartbeat to S%d in T%d", rf.me, i, rf.currentTerm)
 	if !ok {
 		return
 	}
@@ -583,6 +590,7 @@ func (rf *Raft) handleAppendEntriesReply(i int, args *AppendEntriesArgs, reply *
 			rf.resetTimer(rf.electionTimer, true, 0)
 			rf.state = FOLLOWER
 			// stop heartbeat in this node
+			// don't forget stop heartbeat !!!
 			rf.stopHeartbeatCh <- struct{}{}
 			rf.votedFor = -1
 			Debug(dLeader, "S%d receive higher term heartbeatReply (%d > %d), become follower",
@@ -697,6 +705,7 @@ func (rf *Raft) applyCommand() {
 				SnapshotTerm:  rf.snapshotApplyMsg.SnapshotTerm,
 			}
 			rf.snapshotApplyMsg = ApplyMsg{}
+			Debug(dCommit, "S%d apply snapshot, lastIncludedIndex is %d", rf.me, msg.SnapshotIndex)
 			rf.mu.Unlock()
 			rf.applyCh <- msg
 			rf.mu.Lock()
@@ -718,7 +727,7 @@ func (rf *Raft) applyCommand() {
 			rf.lastApplied = rf.commitIndex
 			rf.mu.Unlock()
 			for _, msg := range massages {
-				//Debug(dCommit, "S%d apply %v", rf.me, msg)
+				Debug(dCommit, "S%d apply command at %d", rf.me, msg.CommandIndex)
 				rf.applyCh <- msg
 			}
 			rf.mu.Lock()
