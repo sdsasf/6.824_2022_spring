@@ -24,7 +24,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	Debug(dVote, "S%d receive requestVote", rf.me)
 	if args.Term < rf.currentTerm {
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = false
@@ -41,6 +40,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	if args.Term > rf.currentTerm {
 		if rf.state == LEADER {
 			rf.stopHeartbeatCh <- struct{}{}
+			rf.resetElectionTimeout()
 		}
 		rf.state = FOLLOWER
 		rf.currentTerm = args.Term
@@ -54,7 +54,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		reply.VoteGranted = false
 		Debug(dVote, "S%d reject to vote for S%d in T%d", rf.me, args.CandidateId, rf.currentTerm)
 	} else {
-		rf.resetTimer(rf.electionTimer, true, 0)
+		rf.resetElectionTimeout()
+		// rf.resetTimer(rf.electionTimer, true, 0)
 		rf.votedFor = args.CandidateId
 		reply.Term = args.Term
 		reply.VoteGranted = true
@@ -94,7 +95,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 
 	// reset election timeout
-	rf.resetTimer(rf.electionTimer, true, 0)
+	rf.resetElectionTimeout()
+	// rf.resetTimer(rf.electionTimer, true, 0)
 	Debug(dLog, "S%d receive heartbeat from S%d", rf.me, args.LeaderId)
 
 	needPersist := false
@@ -208,8 +210,8 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 		return
 	}
 	needPersist := false
-	rf.resetTimer(rf.electionTimer, true, 0)
-	rf.state = FOLLOWER
+	rf.resetElectionTimeout()
+	// rf.resetTimer(rf.electionTimer, true, 0)
 	if args.Term > rf.currentTerm {
 		// don't forget stop heartbeat !!!
 		if rf.state == LEADER {
@@ -219,6 +221,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 		rf.votedFor = -1
 		needPersist = true
 	}
+	rf.state = FOLLOWER
 	reply.Term = rf.currentTerm
 	if args.LastIncludedIndex <= rf.snapshotData.lastIncludedIndex || args.LastIncludedIndex <= rf.commitIndex {
 		// outdated snapshot

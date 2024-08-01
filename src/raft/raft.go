@@ -33,7 +33,7 @@ import (
 )
 
 const (
-	HEARTBEAT_TIMEOUT = 60
+	HEARTBEAT_TIMEOUT = 50
 )
 
 type peerState int
@@ -92,8 +92,9 @@ type Raft struct {
 	applyCh   chan ApplyMsg
 	killCh    chan struct{}
 
-	stopElectionCh chan struct{}
-	electionTimer  *time.Timer
+	stopElectionCh  chan struct{}
+	electionTimer   *time.Timer
+	electionTimeout time.Time
 	// channel that stop heartbeat
 	stopHeartbeatCh chan struct{}
 	heartbeatTimer  *time.Timer
@@ -137,8 +138,10 @@ func (rf *Raft) persist() {
 	// e.Encode(rf.yyy)
 	// data := w.Bytes()
 	// rf.persister.SaveRaftState(data)
+	Debug(dPersist, "S%d begin persist raft state", rf.me)
 	raftState := rf.persistRaftState()
 	rf.persister.SaveRaftState(raftState)
+	Debug(dPersist, "S%d finish persist raft state", rf.me)
 }
 
 func (rf *Raft) persistRaftState() []byte {
@@ -341,23 +344,91 @@ func (rf *Raft) killed() bool {
 // The ticker go routine starts a new election if this peer hasn't received
 // heartsbeats recently.
 func (rf *Raft) ticker() {
-	// for rf.killed() == false {
-
 	// Your code here to check if a leader election should
 	// be started and to randomize sleeping time using
 	// time.Sleep().
-	for {
-		select {
-		case <-rf.killCh:
-			return
-		case <-rf.electionTimer.C:
-			// election timeout
-			rf.electLeader()
+	for rf.killed() == false {
+		rf.mu.Lock()
+		if diff := time.Now().Sub(rf.electionTimeout); diff < 0 {
+			Debug(dTimer, "S%d time diff is %d ms, sleep again", rf.me, -diff/1000000)
+			rf.mu.Unlock()
+			time.Sleep(-diff)
+			continue
+		}
+		// rf.electLeader()
+		// rf.resetTimer(rf.electionTimer, true, 0)
+		Debug(dTimer, "S%d  election timeout, enter election", rf.me)
+		rf.resetElectionTimeout()
+		if rf.state == LEADER {
+			rf.mu.Unlock()
+			continue
+		}
+		rf.becomeCandidate()
+		rf.persist()
+		lastLogIndex := rf.lastLogIndex()
+		lastLogTerm := rf.lastLogTerm()
+		currentTerm := rf.currentTerm
+		rf.votes = make(map[int]bool)
+		rf.votes[rf.me] = true
+		rf.mu.Unlock()
+
+		for i, _ := range rf.peers {
+			if i == rf.me {
+				continue
+			}
+			go func(i int) {
+				args := RequestVoteArgs{
+					Term:         currentTerm,
+					CandidateId:  rf.me,
+					LastLogIndex: lastLogIndex,
+					LastLogTerm:  lastLogTerm,
+				}
+				reply := RequestVoteReply{}
+				// don't send RPC with lock !!!
+				ok := rf.sendRequestVote(i, &args, &reply)
+				if !ok {
+					return
+				}
+				rf.mu.Lock()
+				defer rf.mu.Unlock()
+				if rf.currentTerm < reply.Term {
+					Debug(dVote,
+						"S%d Term is lower than S%d, Candidate change to Follower (%d < %d)",
+						rf.me, i, args.Term, rf.currentTerm)
+					rf.state = FOLLOWER
+					rf.currentTerm = reply.Term
+					rf.votedFor = -1
+					// rf.resetTimer(rf.electionTimer, true, 0)
+					// rf.resetElectionTimeout()
+					// Debug(dTimer, "S%d reset election timer", rf.me)
+					rf.persist()
+					return
+				}
+				// in case this node's state is modified by other massage while not hold a lock
+				if rf.state != CANDIDATE || args.Term != rf.currentTerm {
+					// if this requestVote message is delay while next requestVote is begun
+					return
+				}
+				if reply.VoteGranted {
+					Debug(dVote, "S%d receive granted vote from S%d in T%d", rf.me, i, rf.currentTerm)
+					_, exist := rf.votes[i]
+					oldLen := len(rf.votes)
+					if !exist {
+						rf.votes[i] = true
+					}
+					if (oldLen <= len(rf.peers)/2) && (len(rf.votes) > len(rf.peers)/2) {
+						rf.becomeLeader()
+						Debug(dLeader,
+							"S%d become leader in T%d", rf.me, len(rf.votes), rf.currentTerm)
+					}
+				}
+			}(i)
 		}
 	}
 }
 
 func (rf *Raft) electLeader() {
+	Debug(dLeader, "S%d election timeout, enter elect leader", rf.me)
 	rf.mu.Lock()
 	rf.resetTimer(rf.electionTimer, true, 0)
 	if rf.state == LEADER {
@@ -445,6 +516,7 @@ func (rf *Raft) becomeCandidate() {
 
 	rf.votedFor = rf.me
 	rf.currentTerm++
+	Debug(dVote, "S%d become candidate in T%d", rf.me, rf.currentTerm)
 }
 
 func (rf *Raft) heartbeatTicker() {
@@ -587,7 +659,8 @@ func (rf *Raft) handleAppendEntriesReply(i int, args *AppendEntriesArgs, reply *
 	if reply.Term > args.Term {
 		rf.currentTerm = reply.Term
 		if rf.state == LEADER {
-			rf.resetTimer(rf.electionTimer, true, 0)
+			rf.resetElectionTimeout()
+			// rf.resetTimer(rf.electionTimer, true, 0)
 			rf.state = FOLLOWER
 			// stop heartbeat in this node
 			// don't forget stop heartbeat !!!
@@ -688,6 +761,12 @@ func (rf *Raft) resetTimer(timer *time.Timer, needRandom bool, duration time.Dur
 	} else {
 		timer.Reset(duration * time.Millisecond)
 	}
+}
+
+func (rf *Raft) resetElectionTimeout() {
+	timeout := randomTimeout()
+	rf.electionTimeout = time.Now().Add(timeout * time.Millisecond)
+	Debug(dTimer, "S%d add election timeout for %d ms", rf.me, timeout)
 }
 
 // a background goroutine that apply command to state
@@ -810,9 +889,10 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.readPersist(persister.ReadRaftState())
 	rf.snapshotData.currentSnapshot = rf.persister.ReadSnapshot()
 
-	rf.electionTimer = time.NewTimer(randomTimeout())
+	rf.electionTimeout = time.Now().Add(randomTimeout() * time.Millisecond)
+	// rf.electionTimer = time.NewTimer(randomTimeout())
 	rf.heartbeatTimer = time.NewTimer(HEARTBEAT_TIMEOUT)
-	rf.resetTimer(rf.electionTimer, true, 0)
+	// rf.resetTimer(rf.electionTimer, true, 0)
 	// start ticker goroutine to start elections
 	go rf.ticker()
 	go rf.applyCommand()
@@ -820,8 +900,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 }
 
 func randomTimeout() time.Duration {
-	n, _ := rand.Int(rand.Reader, big.NewInt(100))
+	n, _ := rand.Int(rand.Reader, big.NewInt(150))
 	// rand.Seed(time.Now().UnixNano())
-	// election timeout 400-500
-	return time.Duration(n.Int64()) + 400
+	// election timeout 350-500
+	return time.Duration(n.Int64()) + 350
 }
