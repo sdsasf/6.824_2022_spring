@@ -313,8 +313,8 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	Debug(dClient, "S%d append command %d at index %d in T%d",
 		rf.me, entry.Command, entry.Index, rf.currentTerm)
 	rf.persist()
-	// for efficiency
-	// go rf.sendHeartbeat()
+	// for lab3A efficiency
+	go rf.sendHeartbeat()
 	index := entry.Index
 	term := rf.currentTerm
 	isLeader := (rf.state == LEADER)
@@ -660,7 +660,6 @@ func (rf *Raft) handleAppendEntriesReply(i int, args *AppendEntriesArgs, reply *
 		rf.currentTerm = reply.Term
 		if rf.state == LEADER {
 			rf.resetElectionTimeout()
-			// rf.resetTimer(rf.electionTimer, true, 0)
 			rf.state = FOLLOWER
 			// stop heartbeat in this node
 			// don't forget stop heartbeat !!!
