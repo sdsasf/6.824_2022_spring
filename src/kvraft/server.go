@@ -4,6 +4,7 @@ import (
 	"6.824/labgob"
 	"6.824/labrpc"
 	"6.824/raft"
+	"bytes"
 	"log"
 	"sync"
 	"sync/atomic"
@@ -41,7 +42,9 @@ type KVServer struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
-	commitIdxCh map[int]chan Op
+	commitIdxCh   map[int]chan Op
+	raftStateSize int
+	persister     *raft.Persister
 	// persistent state
 	finishMap map[int64]int64
 	dataBase  map[string]string
@@ -187,8 +190,9 @@ func (kv *KVServer) applyMsgReceiver() {
 		if msg.CommandValid {
 			op := msg.Command.(Op)
 			DPrintf("S%d receive applyMsg %v at index %d\n", kv.me, op.Command, index)
+			// kv.raftStateSize += int(unsafe.Sizeof(Op{})) + len(op.Key) + len(op.Value) + len(op.Command)
+			kv.mu.Lock()
 			if op.Command == "Get" {
-				kv.mu.Lock()
 				if kv.finishMap[op.ClerkId] < op.RequestNo {
 					kv.finishMap[op.ClerkId] = op.RequestNo
 				}
@@ -201,11 +205,9 @@ func (kv *KVServer) applyMsgReceiver() {
 					default:
 					}
 				}
-				kv.mu.Unlock()
 			} else {
 				key := op.Key
 				value := op.Value
-				kv.mu.Lock()
 				// check request number again is necessary
 				// because lock is not always hold
 				if kv.finishMap[op.ClerkId] < op.RequestNo {
@@ -237,9 +239,48 @@ func (kv *KVServer) applyMsgReceiver() {
 						}
 					}
 				}
-				kv.mu.Unlock()
 			}
+			if kv.maxraftstate > 0 && kv.persister.RaftStateSize() >= kv.maxraftstate {
+				snapshot := kv.makeSnapshot()
+				kv.mu.Unlock()
+				go func(i int) {
+					kv.rf.Snapshot(i, snapshot)
+				}(index)
+				continue
+			}
+			kv.mu.Unlock()
+		} else {
+			// receive snapshot message
+			kv.mu.Lock()
+			snapshot := msg.Snapshot
+			kv.installSnapshot(snapshot)
+			kv.mu.Unlock()
 		}
+	}
+}
+
+func (kv *KVServer) makeSnapshot() []byte {
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(kv.dataBase)
+	e.Encode(kv.finishMap)
+	return w.Bytes()
+}
+
+func (kv *KVServer) installSnapshot(snapshot []byte) {
+	if snapshot == nil || len(snapshot) < 1 {
+		return
+	}
+	w := bytes.NewBuffer(snapshot)
+	d := labgob.NewDecoder(w)
+	var dataBase map[string]string
+	var finishMap map[int64]int64
+	if d.Decode(&dataBase) != nil ||
+		d.Decode(&finishMap) != nil {
+		panic("Decode failed")
+	} else {
+		kv.dataBase = dataBase
+		kv.finishMap = finishMap
 	}
 }
 
@@ -285,12 +326,15 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 	// You may need initialization code here.
 	kv.mu = sync.Mutex{}
-	kv.finishMap = make(map[int64]int64)
 	kv.commitIdxCh = make(map[int]chan Op)
+	kv.finishMap = make(map[int64]int64)
 	kv.dataBase = make(map[string]string)
+	kv.raftStateSize = 0
+	kv.persister = persister
 
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
+	kv.installSnapshot(kv.persister.ReadSnapshot())
 
 	// You may need initialization code here.
 	go kv.applyMsgReceiver()
