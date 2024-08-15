@@ -1,5 +1,7 @@
 package shardctrler
 
+import "sort"
+
 //
 // Shard controler: assigns shards to replication groups.
 //
@@ -28,14 +30,72 @@ type Config struct {
 	Groups map[int][]string // gid -> servers[]
 }
 
+func copyConfig(config Config) Config {
+	newConfig := Config{
+		Num:    config.Num,
+		Shards: config.Shards,
+		Groups: make(map[int][]string),
+	}
+	for gid, servers := range config.Groups {
+		newSlice := make([]string, len(servers))
+		for i, server := range servers {
+			newSlice[i] = server
+		}
+		newConfig.Groups[gid] = newSlice
+	}
+	// DPrintf("copy config, newConfig have %d group", len(newConfig.Groups))
+	return newConfig
+}
+
+func getMaxShardGid(gidShardMap map[int][]int) int {
+	if shard, ok := gidShardMap[0]; ok && len(shard) > 0 {
+		return 0
+	}
+	// make iteration deterministic
+	gids := make([]int, 0)
+	for gid := range gidShardMap {
+		gids = append(gids, gid)
+	}
+	sort.Ints(gids)
+	res, max := -1, -1
+	for _, gid := range gids {
+		if len(gidShardMap[gid]) > max {
+			res = gid
+			max = len(gidShardMap[gid])
+		}
+	}
+	return res
+}
+
+func getMinShardGid(gidShardMap map[int][]int) int {
+	// make iteration deterministic
+	gids := make([]int, 0)
+	for gid := range gidShardMap {
+		gids = append(gids, gid)
+	}
+	sort.Ints(gids)
+	res, min := -1, NShards+1
+	for _, gid := range gids {
+		if gid != 0 && len(gidShardMap[gid]) < min {
+			res = gid
+			min = len(gidShardMap[gid])
+		}
+	}
+	return res
+}
+
 const (
-	OK = "OK"
+	OK         = "OK"
+	ErrTimeout = "ErrTimeout"
+	ErrFailed  = "ErrFailed"
 )
 
 type Err string
 
 type JoinArgs struct {
-	Servers map[int][]string // new GID -> servers mappings
+	Servers   map[int][]string // new GID -> servers mappings
+	ClerkId   int64
+	RequestNo int64
 }
 
 type JoinReply struct {
@@ -44,7 +104,9 @@ type JoinReply struct {
 }
 
 type LeaveArgs struct {
-	GIDs []int
+	GIDs      []int
+	ClerkId   int64
+	RequestNo int64
 }
 
 type LeaveReply struct {
@@ -53,8 +115,10 @@ type LeaveReply struct {
 }
 
 type MoveArgs struct {
-	Shard int
-	GID   int
+	Shard     int
+	GID       int
+	ClerkId   int64
+	RequestNo int64
 }
 
 type MoveReply struct {
@@ -63,7 +127,9 @@ type MoveReply struct {
 }
 
 type QueryArgs struct {
-	Num int // desired config number
+	Num       int // desired config number
+	ClerkId   int64
+	RequestNo int64
 }
 
 type QueryReply struct {

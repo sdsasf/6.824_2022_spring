@@ -42,9 +42,8 @@ type KVServer struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
-	commitIdxCh   map[int]chan Op
-	raftStateSize int
-	persister     *raft.Persister
+	commitIdxCh map[int]chan Op
+	persister   *raft.Persister
 	// persistent state
 	finishMap map[int64]int64
 	dataBase  map[string]string
@@ -190,7 +189,6 @@ func (kv *KVServer) applyMsgReceiver() {
 		if msg.CommandValid {
 			op := msg.Command.(Op)
 			DPrintf("S%d receive applyMsg %v at index %d\n", kv.me, op.Command, index)
-			// kv.raftStateSize += int(unsafe.Sizeof(Op{})) + len(op.Key) + len(op.Value) + len(op.Command)
 			kv.mu.Lock()
 			if op.Command == "Get" {
 				if kv.finishMap[op.ClerkId] < op.RequestNo {
@@ -329,7 +327,6 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.commitIdxCh = make(map[int]chan Op)
 	kv.finishMap = make(map[int64]int64)
 	kv.dataBase = make(map[string]string)
-	kv.raftStateSize = 0
 	kv.persister = persister
 
 	kv.applyCh = make(chan raft.ApplyMsg)
